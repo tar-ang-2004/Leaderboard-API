@@ -1,0 +1,21 @@
+# railway.toml — Railway deployment configuration
+# Docs: https://docs.railway.app/reference/config-as-code
+
+[build]
+builder      = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Railway injects $PORT automatically — uvicorn reads it via ${PORT:-8000}
+startCommand     = "uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1"
+healthcheckPath  = "/health"
+healthcheckTimeout = 15        # seconds to wait for /health to return 200
+restartPolicyType  = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[environments.production]
+# Override any settings for the production environment here
+# e.g. set LOG_LEVEL=warning to reduce log volume
+
+[environments.staging]
+# Staging can use the same image — no separate build needed
