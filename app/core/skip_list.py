@@ -164,28 +164,26 @@ class SkipList:
 
     def get_rank(self, player_id: str, score: float, timestamp: float) -> Optional[int]:
         """
-        Return the 1-based rank of a node.
+        Return the 1-based rank of a node in O(log n).
         Rank 1 = highest score (or earliest timestamp on a tie).
         Returns None if the node is not in the list.
-        
-        We walk the full level-0 linked list to accurately count all nodes.
-        This ensures nodes that appear only at level 0 are counted correctly.
         """
         rank    = 0
-        current = self.head.forward[0]
+        current = self.head
 
-        # Walk level 0 (the complete sorted linked list)
-        while current is not None:
-            if self._comes_before(current, score, timestamp):
-                # This node comes before our target, count it
-                rank += 1
-                current = current.forward[0]
-            elif current.player_id == player_id:
-                # Found our target node
-                return rank + 1   # convert 0-based count to 1-based rank
-            else:
-                # We've passed the insertion point without finding our target
-                return None
+        # Count how many nodes come strictly before our target.
+        for i in range(self.level - 1, -1, -1):
+            while (
+                current.forward[i] is not None
+                and self._comes_before(current.forward[i], score, timestamp)
+            ):
+                rank   += 1
+                current = current.forward[i]
+
+        # The next node at level 0 should be our target.
+        candidate = current.forward[0]
+        if candidate is not None and candidate.player_id == player_id:
+            return rank + 1   # convert 0-based count to 1-based rank
 
         return None
 

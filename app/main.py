@@ -35,18 +35,24 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import _rate_limit_exceeded_handler
+from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
-from app.api import leaderboards, scores
 from app.core.store import store
-from app.core.config import limiter
 
 logger = logging.getLogger("leaderboard_api")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+)
+
+# ── Rate limiter ───────────────────────────────────────────────────────────────
+# Defined here so routers can import it from app.main
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["300/minute"],
 )
 
 
@@ -143,7 +149,7 @@ app.state.limiter = limiter
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 
-app.add_middleware(SlowAPIMiddleware)   # must be added before CORSMiddleware
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -175,10 +181,6 @@ async def log_requests(request: Request, call_next):
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    """
-    Return a clean 429 response matching our ErrorResponse envelope.
-    Includes Retry-After header so clients know when to retry.
-    """
     return JSONResponse(
         status_code=429,
         headers={"Retry-After": "60"},
@@ -238,8 +240,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-# ── Routers ───────────────────────────────────────────────────────────────────
-
+# ── Routers — imported AFTER app is created to avoid circular imports ─────────
+from app.api import leaderboards, scores  # noqa: E402
 app.include_router(leaderboards.router, prefix="/v1")
 app.include_router(scores.router,       prefix="/v1")
 
