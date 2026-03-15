@@ -7,6 +7,20 @@ Redis or external sorted-set library.
 Built as a portfolio project to demonstrate: skip list internals, LRU caching,
 system design thinking, and the ability to ship a deployable service.
 
+**Live:** https://leaderboard-api-gu4v.onrender.com/docs
+
+---
+
+## Swagger UI
+
+![Leaderboard API Swagger UI](docs/swagger-overview.png)
+
+Full interactive API explorer — try every endpoint directly in the browser.
+
+![Leaderboard Endpoints](docs/swagger-leaderboards.png)
+
+![Scores & Rankings Endpoints](docs/swagger-scores.png)
+
 ---
 
 ## Why a skip list?
@@ -109,17 +123,17 @@ leaderboard-api/
 
 ### Scores & rankings
 
-| Method   | Path                                        | Description                        |
-|----------|---------------------------------------------|------------------------------------|
-| `POST`   | `/v1/leaderboards/{id}/scores`              | Submit or update a score           |
-| `POST`   | `/v1/leaderboards/{id}/scores/bulk`         | Bulk submit up to 500 scores       |
-| `POST`   | `/v1/leaderboards/{id}/scores/increment`    | Add/subtract delta from score      |
-| `DELETE` | `/v1/leaderboards/{id}/scores/{player_id}`  | Remove a player                    |
-| `DELETE` | `/v1/leaderboards/{id}/scores`              | Bulk remove up to 500 players      |
-| `GET`    | `/v1/leaderboards/{id}/top`                 | Top K players                      |
-| `GET`    | `/v1/leaderboards/{id}/rankings`            | Paginated full rankings            |
-| `GET`    | `/v1/leaderboards/{id}/range`               | Players between rank X and rank Y  |
-| `GET`    | `/v1/leaderboards/{id}/players/{id}/rank`   | Player rank + optional nearby      |
+| Method   | Path                                        | Description                            |
+|----------|---------------------------------------------|----------------------------------------|
+| `POST`   | `/v1/leaderboards/{id}/scores`              | Submit or update a score               |
+| `POST`   | `/v1/leaderboards/{id}/scores/bulk`         | Bulk submit up to 500 scores           |
+| `POST`   | `/v1/leaderboards/{id}/scores/increment`    | Add/subtract delta from score          |
+| `DELETE` | `/v1/leaderboards/{id}/scores/{player_id}`  | Remove a player                        |
+| `DELETE` | `/v1/leaderboards/{id}/scores`              | Bulk remove up to 500 players          |
+| `GET`    | `/v1/leaderboards/{id}/top`                 | Top K players                          |
+| `GET`    | `/v1/leaderboards/{id}/rankings`            | Paginated full rankings                |
+| `GET`    | `/v1/leaderboards/{id}/range`               | Players between rank X and rank Y      |
+| `GET`    | `/v1/leaderboards/{id}/players/{id}/rank`   | Player rank + optional nearby window   |
 | `GET`    | `/v1/leaderboards/{id}/search`              | Search by player prefix or score range |
 
 ---
@@ -128,15 +142,18 @@ leaderboard-api/
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/your-username/leaderboard-api
-cd leaderboard-api
+git clone https://github.com/tar-ang-2004/Leaderboard-API
+cd Leaderboard-API
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+# source .venv/bin/activate  # Mac/Linux
 pip install -r requirements.txt
 
 # 2. Run locally
 uvicorn app.main:app --reload
 
 # 3. Open the interactive API explorer
-open http://localhost:8000/docs
+http://localhost:8000/docs
 ```
 
 ### Example workflow
@@ -148,11 +165,11 @@ curl -X POST http://localhost:8000/v1/leaderboards \
   -d '{"name": "chess-world-cup", "order": "desc"}'
 # → {"id": "lb_a1b2c3d4", ...}
 
-# Submit scores
+# Submit a score
 curl -X POST http://localhost:8000/v1/leaderboards/lb_a1b2c3d4/scores \
   -H "Content-Type: application/json" \
   -d '{"player_id": "alice", "score": 2850, "metadata": {"country": "IN"}}'
-# → {"player_id": "alice", "score": 2850, "rank": 1, "percentile": 100.0, ...}
+# → {"player_id": "alice", "score": 2850, "rank": 1, "percentile": 100.0}
 
 # Get the top 5
 curl http://localhost:8000/v1/leaderboards/lb_a1b2c3d4/top?k=5
@@ -169,7 +186,25 @@ curl "http://localhost:8000/v1/leaderboards/lb_a1b2c3d4/search?min_score=2000&ma
 ## Run tests
 
 ```bash
-pytest app/tests/ -v
+python -m pytest app/tests/ -v
+```
+
+All 12 tests pass:
+
+```
+app/tests/test_api.py::test_health                    PASSED
+app/tests/test_api.py::test_create_and_delete_leaderboard  PASSED
+app/tests/test_api.py::test_submit_and_rank           PASSED
+app/tests/test_api.py::test_top_k                     PASSED
+app/tests/test_api.py::test_update_score              PASSED
+app/tests/test_api.py::test_remove_player             PASSED
+app/tests/test_api.py::test_range                     PASSED
+app/tests/test_skip_list.py::test_insert_and_rank     PASSED
+app/tests/test_skip_list.py::test_delete              PASSED
+app/tests/test_skip_list.py::test_top_k               PASSED
+app/tests/test_skip_list.py::test_tie_breaking        PASSED
+app/tests/test_skip_list.py::test_range               PASSED
+12 passed in 0.31s
 ```
 
 ---
@@ -180,10 +215,10 @@ pytest app/tests/ -v
 # Full benchmark (10k / 100k / 1M players)
 python benchmarks/bench.py
 
-# Quick run — skip 1M (faster CI)
+# Quick run — skip 1M
 python benchmarks/bench.py --quick
 
-# Save results to CSV for plotting
+# Save results to CSV
 python benchmarks/bench.py --csv
 ```
 
@@ -204,22 +239,34 @@ CACHE SPEEDUP  —  top100 miss vs hit
 
 ---
 
-## Deploy to Railway
+## Deploy
+
+### Render (live)
+
+This API is deployed on Render:
+**https://leaderboard-api-gu4v.onrender.com/docs**
 
 ```bash
 # 1. Push to GitHub
-git add . && git commit -m "initial commit" && git push
+git add . && git commit -m "deploy" && git push
 
-# 2. Go to railway.app → New Project → Deploy from GitHub repo
-# 3. Select this repo — Railway auto-detects the Dockerfile
-# 4. Done. Your API is live at https://your-app.railway.app/docs
+# 2. render.com → New → Web Service → connect repo
+# 3. Environment: Docker, Instance: Free → Create Web Service
+# 4. Free URL generated automatically
 ```
 
-Railway injects `$PORT` automatically. The `railway.toml` handles everything else.
+> Note: Free tier sleeps after 15 min inactivity — first request after sleep takes ~50s to wake up.
+
+### Docker (local)
+
+```bash
+docker build -t leaderboard-api .
+docker run -p 8000:8000 leaderboard-api
+```
 
 ---
 
-## Scaling to production (interview talking points)
+## Scaling to production
 
 This service is intentionally **single-process and in-memory** for simplicity.
 Here is how you would scale it:
@@ -231,15 +278,15 @@ Here is how you would scale it:
 - Add Postgres for persistent score history and metadata.
 
 **Compute layer:**
-- Run multiple uvicorn workers behind a load balancer (Nginx / Railway replicas).
-- Since state moves to Redis, workers are stateless and can scale horizontally.
+- Run multiple uvicorn workers behind a load balancer.
+- Since state moves to Redis, workers are stateless and scale horizontally.
 
 **Real-time:**
 - Add a WebSocket endpoint that pushes rank changes to connected clients.
 - Use Redis pub/sub to fan out updates across workers.
 
 **Observability:**
-- The `X-Process-Time-Ms` response header is already wired in `main.py`.
+- `X-Process-Time-Ms` response header is already wired in `main.py`.
 - Plug in OpenTelemetry or Prometheus for structured metrics.
 
 ---
@@ -262,7 +309,3 @@ entries automatically. The `invalidate_prefix` method ensures correctness —
 every write flushes all cached reads for that leaderboard.
 
 ---
-
-## License
-
-MIT
