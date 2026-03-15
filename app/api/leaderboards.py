@@ -1,16 +1,18 @@
 """
 Leaderboard management endpoints.
 
-POST   /v1/leaderboards                  Create a leaderboard
-GET    /v1/leaderboards                  List all leaderboards
-GET    /v1/leaderboards/{lb_id}          Get leaderboard detail + stats
-PATCH  /v1/leaderboards/{lb_id}          Update leaderboard settings
-DELETE /v1/leaderboards/{lb_id}          Delete leaderboard and all scores
-POST   /v1/leaderboards/{lb_id}/reset    Wipe all scores (keep the board)
+Rate limits (per IP):
+  POST   /leaderboards         20/minute  — prevent board spam
+  GET    /leaderboards         200/minute — reads are cheap
+  GET    /leaderboards/{id}    200/minute
+  PATCH  /leaderboards/{id}    20/minute
+  DELETE /leaderboards/{id}    20/minute
+  POST   /leaderboards/{id}/reset  10/minute — destructive op
 """
 
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from app.core.config import limiter
 
 from app.models.schemas import (
     CreateLeaderboardRequest,
@@ -41,20 +43,20 @@ def _get_or_404(lb_id: str):
 
 def _to_response(lb) -> LeaderboardResponse:
     stats_raw = store.get_stats(lb)
-    last_upd = stats_raw["last_updated"]
+    last_upd  = stats_raw["last_updated"]
     return LeaderboardResponse(
-        id=lb.id,
-        name=lb.name,
-        order=lb.order,
-        max_entries=lb.max_entries,
-        reset_policy=lb.reset_policy,
-        created_at=datetime.fromtimestamp(lb.created_at, tz=timezone.utc),
+        id           = lb.id,
+        name         = lb.name,
+        order        = lb.order,
+        max_entries  = lb.max_entries,
+        reset_policy = lb.reset_policy,
+        created_at   = datetime.fromtimestamp(lb.created_at, tz=timezone.utc),
         stats=LeaderboardStats(
-            total_players=stats_raw["total_players"],
-            highest_score=stats_raw["highest_score"],
-            lowest_score=stats_raw["lowest_score"],
-            average_score=stats_raw["average_score"],
-            last_updated=datetime.fromisoformat(last_upd) if last_upd else None,
+            total_players = stats_raw["total_players"],
+            highest_score = stats_raw["highest_score"],
+            lowest_score  = stats_raw["lowest_score"],
+            average_score = stats_raw["average_score"],
+            last_updated  = datetime.fromisoformat(last_upd) if last_upd else None,
         ),
     )
 
@@ -66,22 +68,25 @@ def _to_response(lb) -> LeaderboardResponse:
     response_model=LeaderboardResponse,
     status_code=201,
     summary="Create a leaderboard",
-    responses={422: {"model": ErrorResponse}},
+    responses={422: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
-def create_leaderboard(body: CreateLeaderboardRequest):
+@limiter.limit("20/minute")
+def create_leaderboard(request: Request, body: CreateLeaderboardRequest):
     """
     Create a new named leaderboard.
 
     - **name**: URL-safe slug (lowercase letters, digits, hyphens, underscores)
     - **order**: `desc` (high score = rank 1) or `asc` (low score = rank 1)
-    - **max_entries**: cap on stored players; once full the lowest-ranked entry is evicted
-    - **reset_policy**: automatic wipe schedule — `never | daily | weekly | monthly`
+    - **max_entries**: cap on stored players
+    - **reset_policy**: `never | daily | weekly | monthly`
+
+    Rate limit: **20/minute per IP**
     """
     lb = store.create(
-        name=body.name,
-        order=body.order,
-        max_entries=body.max_entries,
-        reset_policy=body.reset_policy,
+        name         = body.name,
+        order        = body.order,
+        max_entries  = body.max_entries,
+        reset_policy = body.reset_policy,
     )
     return _to_response(lb)
 
@@ -90,9 +95,11 @@ def create_leaderboard(body: CreateLeaderboardRequest):
     "/leaderboards",
     response_model=list[LeaderboardResponse],
     summary="List all leaderboards",
+    responses={429: {"model": ErrorResponse}},
 )
-def list_leaderboards():
-    """Return every leaderboard with its current stats."""
+@limiter.limit("200/minute")
+def list_leaderboards(request: Request):
+    """Return every leaderboard with live stats. Rate limit: **200/minute per IP**"""
     return [_to_response(lb) for lb in store.list_all()]
 
 
@@ -100,10 +107,11 @@ def list_leaderboards():
     "/leaderboards/{lb_id}",
     response_model=LeaderboardResponse,
     summary="Get leaderboard details",
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
-def get_leaderboard(lb_id: str):
-    """Retrieve a leaderboard by ID along with live stats (player count, score distribution)."""
+@limiter.limit("200/minute")
+def get_leaderboard(request: Request, lb_id: str):
+    """Retrieve a leaderboard by ID with live stats. Rate limit: **200/minute per IP**"""
     lb = _get_or_404(lb_id)
     return _to_response(lb)
 
@@ -112,12 +120,14 @@ def get_leaderboard(lb_id: str):
     "/leaderboards/{lb_id}",
     response_model=LeaderboardResponse,
     summary="Update leaderboard settings",
-    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
-def update_leaderboard(lb_id: str, body: UpdateLeaderboardRequest):
+@limiter.limit("20/minute")
+def update_leaderboard(request: Request, lb_id: str, body: UpdateLeaderboardRequest):
     """
     Partially update a leaderboard's configuration.
     Only `max_entries` and `reset_policy` are mutable after creation.
+    Rate limit: **20/minute per IP**
     """
     lb = _get_or_404(lb_id)
     lb = store.update(lb, body.max_entries, body.reset_policy)
@@ -128,10 +138,11 @@ def update_leaderboard(lb_id: str, body: UpdateLeaderboardRequest):
     "/leaderboards/{lb_id}",
     status_code=204,
     summary="Delete a leaderboard",
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
-def delete_leaderboard(lb_id: str):
-    """Permanently delete a leaderboard and all of its score data."""
+@limiter.limit("20/minute")
+def delete_leaderboard(request: Request, lb_id: str):
+    """Permanently delete a leaderboard and all its score data. Rate limit: **20/minute per IP**"""
     if not store.delete(lb_id):
         raise HTTPException(
             status_code=404,
@@ -145,17 +156,18 @@ def delete_leaderboard(lb_id: str):
     "/leaderboards/{lb_id}/reset",
     response_model=ResetResponse,
     summary="Reset all scores",
-    responses={404: {"model": ErrorResponse}},
+    responses={404: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
 )
-def reset_leaderboard(lb_id: str):
+@limiter.limit("10/minute")
+def reset_leaderboard(request: Request, lb_id: str):
     """
-    Wipe every score from a leaderboard while keeping the leaderboard itself.
-    Useful for starting a new season or round without losing the configuration.
+    Wipe every score while keeping the leaderboard itself.
+    Rate limit: **10/minute per IP** — destructive operation.
     """
     lb = _get_or_404(lb_id)
     cleared = store.reset(lb)
     return ResetResponse(
-        leaderboard_id=lb_id,
-        players_cleared=cleared,
-        reset_at=datetime.now(tz=timezone.utc),
+        leaderboard_id  = lb_id,
+        players_cleared = cleared,
+        reset_at        = datetime.now(tz=timezone.utc),
     )

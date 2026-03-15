@@ -3,8 +3,11 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.1
 
 # ── Validation ─────────────────────────────────────────────────────────────────
-pydantic==2.9.2           # 2.9.x has pre-built wheels for Python 3.13
+pydantic==2.9.2
 pydantic-settings==2.5.2
+
+# ── Rate limiting ──────────────────────────────────────────────────────────────
+slowapi==0.1.9
 
 # ── HTTP client (tests only) ────────────────────────────────────────────────────
 httpx==0.27.0

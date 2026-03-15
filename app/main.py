@@ -6,20 +6,25 @@ Responsibilities
   1. Construct the FastAPI app with full OpenAPI metadata
   2. Register middleware (CORS, request logging, process-time header)
   3. Register global exception handlers (validation errors, 404s, 500s)
-  4. Mount routers under /v1
-  5. Expose /health and /debug/cache endpoints
+  4. Rate limiting via slowapi — per-IP, per-endpoint limits
+  5. Mount routers under /v1
+  6. Expose /health and /debug/store endpoints
+
+Rate limits (per IP)
+────────────────────
+  Writes  (POST/DELETE scores)  : 120/minute  →  2/sec sustained
+  Reads   (GET rankings/top)    : 200/minute  →  ~3/sec sustained
+  Admin   (create/delete board) : 20/minute
+  Global  fallback              : 300/minute  →  5/sec burst
 
 Running locally
 ───────────────
   uvicorn app.main:app --reload
   → API explorer: http://localhost:8000/docs
-  → ReDoc:        http://localhost:8000/redoc
 
 Deploying
 ─────────
-  Docker + Railway:  see Dockerfile and railway.toml
-  The app is fully stateless per-process — horizontal scaling requires
-  replacing LeaderboardStore with a shared Redis backend.
+  Docker + Render: see Dockerfile
 """
 
 import logging
@@ -30,9 +35,13 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.api import leaderboards, scores
 from app.core.store import store
+from app.core.config import limiter
 
 logger = logging.getLogger("leaderboard_api")
 logging.basicConfig(
@@ -41,14 +50,10 @@ logging.basicConfig(
 )
 
 
-# ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Code before `yield` runs on startup.
-    Code after `yield` runs on shutdown.
-    """
     logger.info("Leaderboard API starting up")
     yield
     logger.info(
@@ -73,6 +78,19 @@ no Redis, no external sorted-set library.
 | Lookup  | **Hash Map**  | O(1) score lookup by player ID |
 | Hot reads | **LRU Cache** | Caches topK / range results, invalidated on every write |
 
+## Rate limits
+
+All limits are **per IP address**:
+
+| Endpoint group | Limit |
+|----------------|-------|
+| Score writes (POST/DELETE scores) | 120 / minute |
+| Score reads (GET top/rankings/range/rank) | 200 / minute |
+| Leaderboard admin (create/delete/reset) | 20 / minute |
+| Global fallback | 300 / minute |
+
+Exceeding a limit returns **HTTP 429** with a `Retry-After` header.
+
 ## Quick start
 
 ```bash
@@ -92,9 +110,10 @@ curl /v1/leaderboards/{id}/top?k=10
 Swap `LeaderboardStore` for a Redis adapter — the API layer is unchanged:
 - `skip_list` → `ZADD` / `ZRANK` / `ZRANGE`
 - `players` dict → `HSET`
-- LRU cache → Redis TTL keys or a local process cache
+- LRU cache → Redis TTL keys
+- Rate limiter → Redis backend via `slowapi` + `redis`
 """,
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=[
@@ -113,20 +132,22 @@ Swap `LeaderboardStore` for a Redis adapter — the API layer is unchanged:
     ],
     contact={
         "name": "GitHub",
-        "url": "https://github.com/your-username/leaderboard-api",
+        "url": "https://github.com/tar-ang-2004/Leaderboard-API",
     },
-    license_info={
-        "name": "MIT",
-    },
+    license_info={"name": "MIT"},
     lifespan=lifespan,
 )
 
+# ── Attach limiter to app state (required by slowapi) ─────────────────────────
+app.state.limiter = limiter
 
 # ── Middleware ────────────────────────────────────────────────────────────────
 
+app.add_middleware(SlowAPIMiddleware)   # must be added before CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # tighten to specific origins in production
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -134,10 +155,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
-    """
-    Attach X-Process-Time (ms) to every response.
-    Useful for latency monitoring and verifying that O(log n) ops are fast.
-    """
+    """Attach X-Process-Time-Ms to every response for latency monitoring."""
     start    = time.perf_counter()
     response = await call_next(request)
     elapsed  = (time.perf_counter() - start) * 1000
@@ -149,23 +167,32 @@ async def add_process_time_header(request: Request, call_next):
 async def log_requests(request: Request, call_next):
     """Log method, path, and response status for every request."""
     response = await call_next(request)
-    logger.info(
-        "%s %s → %d",
-        request.method,
-        request.url.path,
-        response.status_code,
-    )
+    logger.info("%s %s → %d", request.method, request.url.path, response.status_code)
     return response
 
 
 # ── Exception handlers ────────────────────────────────────────────────────────
 
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """
+    Return a clean 429 response matching our ErrorResponse envelope.
+    Includes Retry-After header so clients know when to retry.
+    """
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": "60"},
+        content={
+            "error":   "rate_limit_exceeded",
+            "message": f"Too many requests. Limit: {exc.detail}. Try again in 60 seconds.",
+            "status":  429,
+            "detail":  None,
+        },
+    )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """
-    Override FastAPI's default 422 response to match our ErrorResponse envelope.
-    Surfaces each field-level error clearly so callers know exactly what to fix.
-    """
     errors = []
     for e in exc.errors():
         errors.append({
@@ -199,10 +226,6 @@ async def not_found_handler(request: Request, exc):
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    """
-    Catch-all for any unhandled exception.
-    Logs the full traceback server-side; returns a safe message to the caller.
-    """
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
@@ -225,50 +248,27 @@ app.include_router(scores.router,       prefix="/v1")
 
 @app.get("/", include_in_schema=False)
 def root():
-    """Redirect hint — not shown in docs."""
     return {"status": "ok", "docs": "/docs", "health": "/health"}
 
 
-@app.get(
-    "/health",
-    tags=["Health"],
-    summary="Liveness check",
-    response_description="Returns 200 OK when the service is running.",
-)
+@app.get("/health", tags=["Health"], summary="Liveness check")
 def health():
-    """
-    Simple liveness endpoint.
-    Use this for Railway / Docker health checks and uptime monitors.
-    """
-    return {
-        "status": "ok",
-        "version": app.version,
-    }
+    """Simple liveness endpoint for Render / Docker health checks."""
+    return {"status": "ok", "version": app.version}
 
 
-@app.get(
-    "/debug/store",
-    tags=["Health"],
-    summary="In-memory store snapshot",
-    response_description="Counts of leaderboards and players currently in memory.",
-)
+@app.get("/debug/store", tags=["Health"], summary="In-memory store snapshot")
 def debug_store():
-    """
-    Returns a lightweight snapshot of the in-memory state.
-
-    Useful during development to confirm data is persisting across requests
-    without having to query individual leaderboards.
-    **Do not expose this endpoint in production.**
-    """
+    """Lightweight snapshot of in-memory state. Do not expose in production."""
     boards = store.list_all()
     return {
         "leaderboard_count": len(boards),
         "leaderboards": [
             {
-                "id":            lb.id,
-                "name":          lb.name,
-                "player_count":  lb.skip_list.size,
-                "cache_stats":   store.get_cache_stats(lb),
+                "id":           lb.id,
+                "name":         lb.name,
+                "player_count": lb.skip_list.size,
+                "cache_stats":  store.get_cache_stats(lb),
             }
             for lb in boards
         ],
